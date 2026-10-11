@@ -1,0 +1,132 @@
+//@version=6
+// Diamond TP
+// Paste this into the TradingView Pine Editor and add it to the chart.
+// Defaults match the paper desk in this repo (lib/defaults.ts).
+// Create ONE alert: condition "Diamond TP", "Any alert() function call".
+// Do not also enable order-fill alerts, or TradingView will send each fill twice.
+strategy("Diamond TP", overlay=true, pyramiding=0, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=10, process_orders_on_close=true, calc_on_every_tick=false, max_lines_count=300, max_labels_count=40)
+
+swingLen = input.int(3, "Swing length", minval=2, maxval=8, group="Signal")
+emaLen = input.int(8, "EMA length", minval=3, group="Signal")
+slopeLen = input.int(3, "EMA slope bars", minval=1, group="Signal")
+atrLen = input.int(14, "ATR length", minval=5, group="Bracket")
+rr = input.float(2.0, "Reward multiple", minval=1.0, step=0.1, group="Bracket")
+beR = input.float(1.0, "Move stop to entry after R", minval=0.0, step=0.1, group="Bracket")
+secret = input.string("diamond-tp-local", "Webhook secret", group="Alert")
+
+float trend = ta.ema(close, emaLen)
+float average = ta.atr(atrLen)
+float ph = ta.pivothigh(high, swingLen, swingLen)
+float pl = ta.pivotlow(low, swingLen, swingLen)
+
+var float activeStop = na
+var float activeTp = na
+var float activeRisk = na
+var float activeEntry = na
+var bool armedBe = false
+
+bool rising = trend > trend[slopeLen]
+bool falling = trend < trend[slopeLen]
+float longStop = pl - average * 0.25
+float shortStop = ph + average * 0.25
+float longRisk = close - longStop
+float shortRisk = shortStop - close
+bool longOk = not na(pl) and rising and close > open and close > pl and longRisk > average * 0.4 and longRisk < average * 4.5 and strategy.position_size == 0
+bool shortOk = not na(ph) and falling and close < open and close < ph and shortRisk > average * 0.4 and shortRisk < average * 4.5 and strategy.position_size == 0 and not longOk
+
+entryMsg(string action, float px, float sl, float tp) =>
+    '{"secret":"' + secret + '","action":"' + action + '","symbol":"' + syminfo.ticker + '","price":' + str.tostring(px, format.mintick) + ',"sl":' + str.tostring(sl, format.mintick) + ',"tp":' + str.tostring(tp, format.mintick) + '}'
+
+closeMsg(string reason, float px) =>
+    '{"secret":"' + secret + '","action":"close","symbol":"' + syminfo.ticker + '","price":' + str.tostring(px, format.mintick) + ',"reason":"' + reason + '"}'
+
+if longOk
+    float target = close + longRisk * rr
+    activeEntry := close
+    activeStop := longStop
+    activeTp := target
+    activeRisk := longRisk
+    armedBe := false
+    strategy.entry("Long", strategy.long, alert_message=entryMsg("buy", close, longStop, target))
+    strategy.exit("Long exit", from_entry="Long", stop=longStop, limit=target, alert_profit=closeMsg("take_profit", target), alert_loss=closeMsg("stop", longStop))
+    alert(entryMsg("buy", close, longStop, target), alert.freq_once_per_bar_close)
+
+if shortOk
+    float target = close - shortRisk * rr
+    activeEntry := close
+    activeStop := shortStop
+    activeTp := target
+    activeRisk := shortRisk
+    armedBe := false
+    strategy.entry("Short", strategy.short, alert_message=entryMsg("sell", close, shortStop, target))
+    strategy.exit("Short exit", from_entry="Short", stop=shortStop, limit=target, alert_profit=closeMsg("take_profit", target), alert_loss=closeMsg("stop", shortStop))
+    alert(entryMsg("sell", close, shortStop, target), alert.freq_once_per_bar_close)
+
+bool managingLong = strategy.position_size > 0 and strategy.opentrades > 0 and bar_index > strategy.opentrades.entry_bar_index(strategy.opentrades - 1)
+bool managingShort = strategy.position_size < 0 and strategy.opentrades > 0 and bar_index > strategy.opentrades.entry_bar_index(strategy.opentrades - 1)
+
+if managingLong and beR > 0 and not na(activeRisk)
+    if high - strategy.position_avg_price >= activeRisk * beR
+        activeStop := math.max(nz(activeStop, activeEntry), strategy.position_avg_price)
+        armedBe := true
+    string longLoss = armedBe and math.abs(activeStop - strategy.position_avg_price) <= syminfo.mintick ? "breakeven" : "stop"
+    strategy.exit("Long exit", from_entry="Long", stop=activeStop, limit=activeTp, alert_profit=closeMsg("take_profit", activeTp), alert_loss=closeMsg(longLoss, activeStop))
+
+if managingShort and beR > 0 and not na(activeRisk)
+    if strategy.position_avg_price - low >= activeRisk * beR
+        activeStop := math.min(nz(activeStop, activeEntry), strategy.position_avg_price)
+        armedBe := true
+    string shortLoss = armedBe and math.abs(activeStop - strategy.position_avg_price) <= syminfo.mintick ? "breakeven" : "stop"
+    strategy.exit("Short exit", from_entry="Short", stop=activeStop, limit=activeTp, alert_profit=closeMsg("take_profit", activeTp), alert_loss=closeMsg(shortLoss, activeStop))
+
+bool justFlat = strategy.position_size == 0 and strategy.position_size[1] != 0 and strategy.closedtrades > 0
+if justFlat
+    float exitPx = strategy.closedtrades.exit_price(strategy.closedtrades - 1)
+    string reason = "stop"
+    if math.abs(exitPx - nz(activeTp)) <= syminfo.mintick * 2
+        reason := "take_profit"
+    else if armedBe and math.abs(exitPx - nz(activeEntry)) <= syminfo.mintick * 2
+        reason := "breakeven"
+    alert(closeMsg(reason, exitPx), alert.freq_once_per_bar_close)
+
+plot(trend, "EMA", color.new(#2f62d6, 45))
+plot(strategy.position_size != 0 ? activeStop : na, "Stop", color.new(#a33b32, 0), 2, plot.style_linebr)
+plot(strategy.position_size != 0 ? activeTp : na, "Take profit", color.new(#1f7a4d, 0), 2, plot.style_linebr)
+plotshape(close >= open, "Bull bar", shape.diamond, location.belowbar, color.new(#2f62d6, 0), size=size.tiny)
+plotshape(close < open, "Bear bar", shape.arrowdown, location.abovebar, color.new(#d23b3b, 0), size=size.tiny)
+plotshape(longOk, "Long", shape.diamond, location.belowbar, color.new(#2f62d6, 0), size=size.small)
+plotshape(shortOk, "Short", shape.arrowdown, location.abovebar, color.new(#d23b3b, 0), size=size.small)
+
+var int prevHighBar = na
+var float prevHighPrice = na
+var int prevLowBar = na
+var float prevLowPrice = na
+
+if not na(ph)
+    int b = bar_index - swingLen
+    if not na(prevHighBar)
+        line.new(prevHighBar, prevHighPrice, b, ph, color=color.new(color.gray, 25))
+    prevHighBar := b
+    prevHighPrice := ph
+
+if not na(pl)
+    int b = bar_index - swingLen
+    if not na(prevHighPrice) and prevHighPrice - pl > average * 2.2
+        for fan = 1 to 5
+            line.new(b, pl, b + 16, pl + (prevHighPrice - pl) * fan / 5.0, color=color.new(color.gray, 40), style=line.style_dashed)
+    if not na(prevLowBar)
+        line.new(prevLowBar, prevLowPrice, b, pl, color=color.new(color.gray, 25))
+    prevLowBar := b
+    prevLowPrice := pl
+
+var table ticket = table.new(position.bottom_center, 4, 2, bgcolor=color.new(color.white, 8), border_width=1, border_color=color.gray, frame_width=1, frame_color=color.gray)
+if barstate.islast
+    table.cell(ticket, 0, 0, "Price", text_color=color.black, text_size=size.small)
+    table.cell(ticket, 1, 0, "S/L", text_color=color.black, text_size=size.small)
+    table.cell(ticket, 2, 0, "T/P", text_color=color.black, text_size=size.small)
+    table.cell(ticket, 3, 0, "Price", text_color=color.black, text_size=size.small)
+    float shown = strategy.position_size != 0 ? strategy.position_avg_price : close
+    table.cell(ticket, 0, 1, str.tostring(shown, format.mintick), text_color=color.black, text_size=size.small)
+    table.cell(ticket, 1, 1, strategy.position_size != 0 ? str.tostring(activeStop, format.mintick) : "—", text_color=color.red, text_size=size.small)
+    table.cell(ticket, 2, 1, strategy.position_size != 0 ? str.tostring(activeTp, format.mintick) : "—", text_color=color.green, text_size=size.small)
+    table.cell(ticket, 3, 1, str.tostring(close, format.mintick), text_color=color.black, text_size=size.small)
