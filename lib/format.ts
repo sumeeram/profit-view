@@ -41,7 +41,7 @@ export function reasonLabel(reason: ExitReason): string {
     case "stop":
       return "Stop";
     case "breakeven":
-      return "Entry stop";
+      return "Locked stop";
     case "manual":
       return "Closed";
   }

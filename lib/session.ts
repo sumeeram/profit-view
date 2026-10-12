@@ -97,7 +97,7 @@ export function step(state: DeskState): DeskState {
       logs = pushLog(
         logs,
         bar.time,
-        `Stop moved to entry ${formatPx(resolved.position.stop)}. Take profit stays at ${formatPx(resolved.position.takeProfit)}.`,
+        `Stop locked at ${formatPx(resolved.position.stop)} after ${state.settings.breakevenAtR}R. Take profit stays at ${formatPx(resolved.position.takeProfit)}.`,
       );
     }
     if (resolved.exit) {
@@ -364,6 +364,7 @@ function openPosition(
       source: request.source,
       breakevenArmed: false,
       riskPerUnit: bracket.riskPerUnit,
+      peak: bracket.entry,
     };
     const reward = Math.abs(bracket.takeProfit - bracket.entry);
     const multiple = (reward / bracket.riskPerUnit).toFixed(2);

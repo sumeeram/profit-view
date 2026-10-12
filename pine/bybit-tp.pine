@@ -1,0 +1,229 @@
+//@version=6
+// Bybit TP
+// For Bybit USDT perpetuals on the 1 hour chart:
+//   Core:  SOLUSDT, APTUSDT, and STRKUSDT / QNTUSDT when the trend is already clean.
+//   Thin:  BELUSDT, PIXELUSDT, RLCUSDT. Wider stop, higher ADX, more volume, fewer trades.
+//   Stock: ONUSDT (ON Semiconductor on Bybit). No Bitcoin filter. Still a thin book.
+//
+// A long is a confirmed swing back to the 21 EMA while the 55 EMA, the 4 hour trend,
+// and Bitcoin's 4 hour trend (alts only) still point up. Volume has to be alive.
+// Climax bars and the 00:00 / 08:00 / 16:00 UTC funding hours are skipped.
+// Stop sits past the swing. Risk outside the ATR band is skipped. Target is 2R.
+// After 1.25R the stop locks 0.2R and trails. Size is 0.5% of equity per trade.
+//
+// Paste into the Pine Editor, add it to BYBIT:SOLUSDT.P (or the other perp), timeframe 60.
+// One alert: "Bybit TP", "Any alert() function call". Do not also enable order fills.
+// Diamond TP is the gold script. Leave that file alone. Do not run both alerts on one chart.
+strategy("Bybit TP", overlay=true, pyramiding=0, initial_capital=10000, default_qty_type=strategy.fixed, default_qty_value=1, process_orders_on_close=true, calc_on_every_tick=false, commission_type=strategy.commission.percent, commission_value=0.055, max_lines_count=300, max_labels_count=40)
+
+swingLen = input.int(4, "Swing length", minval=2, maxval=8, group="Signal")
+emaLen = input.int(21, "Fast EMA", minval=8, group="Signal")
+slowLen = input.int(55, "Slow EMA", minval=20, group="Signal")
+slopeLen = input.int(4, "Slow EMA slope bars", minval=1, group="Signal")
+gapBars = input.int(8, "Bars between entries", minval=1, group="Signal")
+atrLen = input.int(14, "ATR length", minval=5, group="Bracket")
+stopBuf = input.float(0.75, "Stop buffer (ATR)", minval=0.2, step=0.05, group="Bracket")
+minRisk = input.float(1.0, "Minimum risk (ATR)", minval=0.3, step=0.1, group="Bracket")
+maxRisk = input.float(2.3, "Maximum risk (ATR)", minval=0.8, step=0.1, group="Bracket")
+rr = input.float(2.0, "Reward multiple", minval=1.0, step=0.1, group="Bracket")
+beR = input.float(1.25, "Lock profit after R", minval=0.0, step=0.05, group="Bracket")
+lockR = input.float(0.2, "Locked profit (R)", minval=0.0, step=0.05, group="Bracket")
+trailR = input.float(1.35, "Trail give-back (R)", minval=0.5, step=0.05, group="Bracket")
+riskPct = input.float(0.5, "Risk percent of equity", minval=0.1, maxval=2, step=0.1, group="Bracket")
+adxLen = input.int(14, "ADX length", minval=5, group="Filter")
+adxMin = input.float(22.0, "Minimum ADX", minval=5, step=1, group="Filter")
+rsiLen = input.int(14, "RSI length", minval=5, group="Filter")
+rsiLongMin = input.float(45.0, "Long RSI from", group="Filter")
+rsiLongMax = input.float(72.0, "Long RSI to", group="Filter")
+rsiShortMin = input.float(28.0, "Short RSI from", group="Filter")
+rsiShortMax = input.float(55.0, "Short RSI to", group="Filter")
+maxChase = input.float(1.2, "Max chase from fast EMA (ATR)", minval=0.2, step=0.05, group="Filter")
+pullback = input.float(1.8, "Max pullback through fast EMA (ATR)", minval=0.3, step=0.1, group="Filter")
+pullSlack = input.float(0.45, "Pullback may stop this far short (ATR)", minval=0.0, step=0.05, group="Filter")
+minBody = input.float(0.45, "Minimum candle body", minval=0.1, maxval=1, step=0.05, group="Filter")
+maxWick = input.float(0.45, "Max rejection wick", minval=0.15, maxval=0.8, step=0.05, group="Filter")
+climaxAtr = input.float(2.2, "Skip bars wider than (ATR)", minval=1.2, step=0.1, group="Filter")
+volLen = input.int(20, "Volume average", minval=5, group="Filter")
+volMult = input.float(1.1, "Minimum volume multiple", minval=0.5, step=0.05, group="Filter")
+useHtf = input.bool(true, "Require 4 hour trend", group="Filter")
+htf = input.timeframe("240", "Higher timeframe", group="Filter")
+useBtc = input.bool(true, "Require Bitcoin 4 hour trend", group="Filter")
+btcSymbol = input.symbol("BYBIT:BTCUSDT.P", "Bitcoin perp", group="Filter")
+skipFunding = input.bool(true, "Skip funding hours 00, 08, 16 UTC", group="Filter")
+secret = input.string("diamond-tp-local", "Webhook secret", group="Alert")
+
+string ticker = syminfo.ticker
+bool stockPerp = str.contains(ticker, "ONUSDT")
+bool thinBook = str.contains(ticker, "BELUSDT") or str.contains(ticker, "PIXELUSDT") or str.contains(ticker, "RLCUSDT") or stockPerp
+float buf = thinBook ? stopBuf + 0.35 : stopBuf
+float minRiskUse = thinBook ? math.max(minRisk, 1.15) : minRisk
+float maxRiskUse = thinBook ? math.min(maxRisk, 2.0) : maxRisk
+float adxNeed = thinBook ? math.max(adxMin, 25.0) : adxMin
+float volNeed = thinBook ? math.max(volMult, 1.35) : volMult
+float pullCap = thinBook ? pullback * 0.8 : pullback
+float bodyNeed = thinBook ? math.max(minBody, 0.5) : minBody
+
+float trend = ta.ema(close, emaLen)
+float slow = ta.ema(close, slowLen)
+float average = ta.atr(atrLen)
+float momentum = ta.rsi(close, rsiLen)
+float volAvg = ta.sma(volume, volLen)
+[diPlus, diMinus, adx] = ta.dmi(adxLen, adxLen)
+bool dmiReady = not na(diPlus) and not na(diMinus) and not na(adx)
+float ph = ta.pivothigh(high, swingLen, swingLen)
+float pl = ta.pivotlow(low, swingLen, swingLen)
+
+float htfFast = request.security(syminfo.tickerid, htf, ta.ema(close, emaLen)[1], barmerge.gaps_off, barmerge.lookahead_on)
+float htfSlow = request.security(syminfo.tickerid, htf, ta.ema(close, slowLen)[1], barmerge.gaps_off, barmerge.lookahead_on)
+bool htfUp = not useHtf or htfFast > htfSlow
+bool htfDown = not useHtf or htfFast < htfSlow
+
+bool btcOn = useBtc and not stockPerp
+float btcFast = request.security(btcSymbol, "240", ta.ema(close, emaLen)[1], barmerge.gaps_off, barmerge.lookahead_on)
+float btcSlow = request.security(btcSymbol, "240", ta.ema(close, slowLen)[1], barmerge.gaps_off, barmerge.lookahead_on)
+bool btcUp = not btcOn or btcFast > btcSlow
+bool btcDown = not btcOn or btcFast < btcSlow
+
+int utcHour = hour(time, "UTC")
+bool fundingBar = utcHour == 0 or utcHour == 8 or utcHour == 16
+bool clockOk = not skipFunding or not fundingBar
+
+var float activeStop = na
+var float activeTp = na
+var float activeRisk = na
+var float activeEntry = na
+var float activePeak = na
+var bool armedBe = false
+var int lastEntryBar = na
+
+bool spaced = na(lastEntryBar) or bar_index - lastEntryBar >= gapBars
+bool rising = slow > slow[slopeLen] and trend > slow and close > slow and adx >= adxNeed
+bool falling = slow < slow[slopeLen] and trend < slow and close < slow and adx >= adxNeed
+float span = high - low
+float body = span > 0 ? math.abs(close - open) / span : 0.0
+float upperWick = high - math.max(open, close)
+float lowerWick = math.min(open, close) - low
+bool longCandle = close > open and body >= bodyNeed and span > 0 and upperWick / span <= maxWick and span < average * climaxAtr
+bool shortCandle = close < open and body >= bodyNeed and span > 0 and lowerWick / span <= maxWick and span < average * climaxAtr
+bool volOk = not na(volAvg) and volAvg > 0 and volume >= volAvg * volNeed
+bool longPull = not na(pl) and not na(trend[swingLen]) and not na(average[swingLen]) and pl <= trend[swingLen] + average[swingLen] * pullSlack and pl >= trend[swingLen] - average[swingLen] * pullCap
+bool shortPull = not na(ph) and not na(trend[swingLen]) and not na(average[swingLen]) and ph >= trend[swingLen] - average[swingLen] * pullSlack and ph <= trend[swingLen] + average[swingLen] * pullCap
+bool longRsi = momentum > momentum[1] and momentum >= rsiLongMin and momentum <= rsiLongMax
+bool shortRsi = momentum < momentum[1] and momentum <= rsiShortMax and momentum >= rsiShortMin
+float longStop = pl - average * buf
+float shortStop = ph + average * buf
+float longRisk = close - longStop
+float shortRisk = shortStop - close
+bool longRiskOk = longRisk > average * minRiskUse and longRisk < average * maxRiskUse
+bool shortRiskOk = shortRisk > average * minRiskUse and shortRisk < average * maxRiskUse
+bool longChase = close > trend and close - trend <= average * maxChase
+bool shortChase = close < trend and trend - close <= average * maxChase
+bool flat = strategy.position_size == 0
+bool longOk = barstate.isconfirmed and dmiReady and clockOk and volOk and htfUp and btcUp and spaced and longPull and rising and longCandle and close > pl and longChase and longRsi and longRiskOk and flat
+bool shortOk = barstate.isconfirmed and dmiReady and clockOk and volOk and htfDown and btcDown and spaced and shortPull and falling and shortCandle and close < ph and shortChase and shortRsi and shortRiskOk and flat and not longOk
+
+entryMsg(string action, float px, float sl, float tp) =>
+    '{"secret":"' + secret + '","action":"' + action + '","symbol":"' + ticker + '","price":' + str.tostring(px, format.mintick) + ',"sl":' + str.tostring(sl, format.mintick) + ',"tp":' + str.tostring(tp, format.mintick) + '}'
+
+closeMsg(string reason, float px) =>
+    '{"secret":"' + secret + '","action":"close","symbol":"' + ticker + '","price":' + str.tostring(px, format.mintick) + ',"reason":"' + reason + '"}'
+
+float riskCash = strategy.equity * riskPct / 100.0
+
+if longOk
+    float target = close + longRisk * rr
+    float qty = riskCash / longRisk
+    activeEntry := close
+    activeStop := longStop
+    activeTp := target
+    activeRisk := longRisk
+    activePeak := close
+    armedBe := false
+    lastEntryBar := bar_index
+    strategy.entry("Long", strategy.long, qty=qty, alert_message=entryMsg("buy", close, longStop, target))
+    strategy.exit("Long exit", from_entry="Long", stop=longStop, limit=target, alert_profit=closeMsg("take_profit", target), alert_loss=closeMsg("stop", longStop))
+    alert(entryMsg("buy", close, longStop, target), alert.freq_once_per_bar_close)
+
+if shortOk
+    float target = close - shortRisk * rr
+    float qty = riskCash / shortRisk
+    activeEntry := close
+    activeStop := shortStop
+    activeTp := target
+    activeRisk := shortRisk
+    activePeak := close
+    armedBe := false
+    lastEntryBar := bar_index
+    strategy.entry("Short", strategy.short, qty=qty, alert_message=entryMsg("sell", close, shortStop, target))
+    strategy.exit("Short exit", from_entry="Short", stop=shortStop, limit=target, alert_profit=closeMsg("take_profit", target), alert_loss=closeMsg("stop", shortStop))
+    alert(entryMsg("sell", close, shortStop, target), alert.freq_once_per_bar_close)
+
+bool managingLong = strategy.position_size > 0 and strategy.opentrades > 0 and bar_index > strategy.opentrades.entry_bar_index(strategy.opentrades - 1)
+bool managingShort = strategy.position_size < 0 and strategy.opentrades > 0 and bar_index > strategy.opentrades.entry_bar_index(strategy.opentrades - 1)
+
+if managingLong and not na(activeRisk)
+    activePeak := math.max(nz(activePeak, high), high)
+    if beR > 0 and activePeak - strategy.position_avg_price >= activeRisk * beR
+        float lock = strategy.position_avg_price + activeRisk * lockR
+        float trail = activePeak - activeRisk * trailR
+        float candidate = math.max(lock, trail)
+        activeStop := math.max(nz(activeStop, candidate), candidate)
+        if not na(activeTp) and activeStop >= activeTp
+            activeStop := activeTp - syminfo.mintick
+        armedBe := true
+    string longLoss = armedBe and activeStop >= strategy.position_avg_price ? "breakeven" : "stop"
+    strategy.exit("Long exit", from_entry="Long", stop=activeStop, limit=activeTp, alert_profit=closeMsg("take_profit", activeTp), alert_loss=closeMsg(longLoss, activeStop))
+
+if managingShort and not na(activeRisk)
+    activePeak := math.min(nz(activePeak, low), low)
+    if beR > 0 and strategy.position_avg_price - activePeak >= activeRisk * beR
+        float lock = strategy.position_avg_price - activeRisk * lockR
+        float trail = activePeak + activeRisk * trailR
+        float candidate = math.min(lock, trail)
+        activeStop := math.min(nz(activeStop, candidate), candidate)
+        if not na(activeTp) and activeStop <= activeTp
+            activeStop := activeTp + syminfo.mintick
+        armedBe := true
+    string shortLoss = armedBe and activeStop <= strategy.position_avg_price ? "breakeven" : "stop"
+    strategy.exit("Short exit", from_entry="Short", stop=activeStop, limit=activeTp, alert_profit=closeMsg("take_profit", activeTp), alert_loss=closeMsg(shortLoss, activeStop))
+
+bool justFlat = strategy.position_size == 0 and strategy.position_size[1] != 0 and strategy.closedtrades > 0
+if justFlat
+    float exitPx = strategy.closedtrades.exit_price(strategy.closedtrades - 1)
+    bool wasLong = strategy.position_size[1] > 0
+    bool profitSide = wasLong ? exitPx >= nz(activeEntry) - syminfo.mintick : exitPx <= nz(activeEntry) + syminfo.mintick
+    string reason = "stop"
+    if math.abs(exitPx - nz(activeTp)) <= syminfo.mintick * 2
+        reason := "take_profit"
+    else if armedBe and profitSide
+        reason := "breakeven"
+    alert(closeMsg(reason, exitPx), alert.freq_once_per_bar_close)
+
+plot(trend, "Fast EMA", color.new(#2f62d6, 10))
+plot(slow, "Slow EMA", color.new(#6b645c, 0))
+plot(strategy.position_size != 0 ? activeStop : na, "Stop", color.new(#a33b32, 0), 2, plot.style_linebr)
+plot(strategy.position_size != 0 ? activeTp : na, "Take profit", color.new(#1f7a4d, 0), 2, plot.style_linebr)
+plotshape(longOk, "Long", shape.diamond, location.belowbar, color.new(#2f62d6, 0), size=size.small)
+plotshape(shortOk, "Short", shape.arrowdown, location.abovebar, color.new(#d23b3b, 0), size=size.small)
+
+var label tfNote = na
+if barstate.islast
+    if not na(tfNote)
+        label.delete(tfNote)
+        tfNote := na
+    if timeframe.period != "60"
+        tfNote := label.new(bar_index, high, "Use the 1 hour Bybit perp", style=label.style_label_down, color=color.new(#8a5a12, 0), textcolor=color.white, size=size.small)
+
+var table ticket = table.new(position.bottom_center, 4, 2, bgcolor=color.new(color.white, 8), border_width=1, border_color=color.gray, frame_width=1, frame_color=color.gray)
+if barstate.islast
+    string profile = stockPerp ? "Stock" : thinBook ? "Thin" : "Core"
+    table.cell(ticket, 0, 0, "Price", text_color=color.black, text_size=size.small)
+    table.cell(ticket, 1, 0, "S/L", text_color=color.black, text_size=size.small)
+    table.cell(ticket, 2, 0, "T/P", text_color=color.black, text_size=size.small)
+    table.cell(ticket, 3, 0, profile, text_color=color.black, text_size=size.small)
+    float shown = strategy.position_size != 0 ? strategy.position_avg_price : close
+    table.cell(ticket, 0, 1, str.tostring(shown, format.mintick), text_color=color.black, text_size=size.small)
+    table.cell(ticket, 1, 1, strategy.position_size != 0 ? str.tostring(activeStop, format.mintick) : "—", text_color=color.red, text_size=size.small)
+    table.cell(ticket, 2, 1, strategy.position_size != 0 ? str.tostring(activeTp, format.mintick) : "—", text_color=color.green, text_size=size.small)
+    string bias = stockPerp ? "No BTC" : btcFast > btcSlow ? "BTC up" : "BTC down"
+    table.cell(ticket, 3, 1, bias, text_color=color.black, text_size=size.small)

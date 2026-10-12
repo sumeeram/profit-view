@@ -40,6 +40,8 @@ export type Position = {
   source: Source;
   breakevenArmed: boolean;
   riskPerUnit: number;
+  /** Best price since the fill. The trail is measured from this, not from the close. */
+  peak: number;
 };
 
 export type ClosedTrade = Position & {

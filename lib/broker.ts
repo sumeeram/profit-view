@@ -1,4 +1,5 @@
 import { round2, roundPx } from "./indicators";
+import { signalRules } from "./signal-rules";
 import type { Candle, ExitReason, Position, Settings, Side } from "./types";
 
 export class BracketError extends Error {
@@ -101,53 +102,63 @@ export type BarResolution = {
  */
 export function resolveBar(position: Position, bar: Candle, breakevenAtR: number): BarResolution {
   const long = position.side === "long";
+  const peak = long ? Math.max(position.peak, bar.high) : Math.min(position.peak, bar.low);
+  const marked = { ...position, peak };
   const hitStop = long ? bar.low <= position.stop : bar.high >= position.stop;
   const hitTarget = long ? bar.high >= position.takeProfit : bar.low <= position.takeProfit;
 
-  if (hitStop && hitTarget) {
-    return {
-      position,
-      movedToBreakeven: false,
-      exit: {
-        price: position.stop,
-        reason: position.stop === position.entry ? "breakeven" : "stop",
-      },
-    };
-  }
   if (hitStop) {
     return {
-      position,
+      position: marked,
       movedToBreakeven: false,
       exit: {
         price: position.stop,
-        reason: position.stop === position.entry ? "breakeven" : "stop",
+        reason: lockedExit(position, position.stop) ? "breakeven" : "stop",
       },
     };
   }
   if (hitTarget) {
     return {
-      position,
+      position: marked,
       movedToBreakeven: false,
       exit: { price: position.takeProfit, reason: "take_profit" },
     };
   }
 
-  if (position.breakevenArmed || breakevenAtR <= 0) {
-    return { position, movedToBreakeven: false };
+  if (breakevenAtR <= 0) {
+    return { position: marked, movedToBreakeven: false };
   }
 
-  const favorable = long ? bar.high : bar.low;
-  const traveled = long ? favorable - position.entry : position.entry - favorable;
-  if (traveled + 1e-9 < position.riskPerUnit * breakevenAtR) {
-    return { position, movedToBreakeven: false };
+  const traveled = long ? peak - position.entry : position.entry - peak;
+  const armed = position.breakevenArmed || traveled + 1e-9 >= position.riskPerUnit * breakevenAtR;
+  if (!armed) {
+    return { position: marked, movedToBreakeven: false };
   }
 
+  const lock = long
+    ? position.entry + position.riskPerUnit * signalRules.lockR
+    : position.entry - position.riskPerUnit * signalRules.lockR;
+  const trail = long ? peak - position.riskPerUnit : peak + position.riskPerUnit;
+  const candidate = long ? Math.max(lock, trail) : Math.min(lock, trail);
+  let stop = long ? Math.max(position.stop, candidate) : Math.min(position.stop, candidate);
+  stop = capStop(long, roundPx(stop), position.takeProfit);
   return {
     position: {
-      ...position,
-      stop: position.entry,
+      ...marked,
+      stop,
       breakevenArmed: true,
     },
-    movedToBreakeven: true,
+    movedToBreakeven: !position.breakevenArmed,
   };
+}
+
+function lockedExit(position: Position, price: number): boolean {
+  if (!position.breakevenArmed) return false;
+  return position.side === "long" ? price >= position.entry - 1e-9 : price <= position.entry + 1e-9;
+}
+
+function capStop(long: boolean, stop: number, takeProfit: number): number {
+  if (long && stop >= takeProfit) return roundPx(takeProfit - 0.01);
+  if (!long && stop <= takeProfit) return roundPx(takeProfit + 0.01);
+  return stop;
 }

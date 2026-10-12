@@ -254,7 +254,7 @@ export function Desk() {
                 <TicketCell
                   label="S/L"
                   value={position ? formatPx(position.stop) : "—"}
-                  hint={position?.breakevenArmed ? "Moved to entry" : undefined}
+                  hint={position?.breakevenArmed ? "Locked in profit" : undefined}
                   tone="stop"
                 />
                 <TicketCell
@@ -296,7 +296,7 @@ export function Desk() {
                     ? position.source === "strategy"
                       ? "The tape closes this at the target or the stop, whichever prints first. A bar that hits both fills the stop."
                       : "TradingView owns this bracket. It stays open until a close alert arrives."
-                    : "Waiting for a swing that agrees with the trend and has both a stop and a target."}
+                    : "Waiting for a pullback to the fast average, with the slower trend and a stop and target both priced."}
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-3 text-sm">
@@ -338,7 +338,7 @@ export function Desk() {
                 <Field label="Reward multiple" value={draft.rewardRisk} onChange={(value) => setDraft({ ...draft, rewardRisk: value })} />
                 <Field label="Risk percent" value={draft.riskPercent} onChange={(value) => setDraft({ ...draft, riskPercent: value })} />
                 <Field label="ATR stop multiple" value={draft.atrStopMult} onChange={(value) => setDraft({ ...draft, atrStopMult: value })} />
-                <Field label="Move stop to entry after R" value={draft.breakevenAtR} onChange={(value) => setDraft({ ...draft, breakevenAtR: value })} />
+                <Field label="Lock a profit after R" value={draft.breakevenAtR} onChange={(value) => setDraft({ ...draft, breakevenAtR: value })} />
                 <Button
                   variant="secondary"
                   className="w-full"
@@ -372,8 +372,8 @@ export function Desk() {
           <TabsContent value="trades" className="pt-3">
             {desk.trades.length === 0 ? (
               <p className="text-sm text-[#5c564e]">
-                No closed trades yet. Run the tape. A fill appears only after a confirmed swing, and the target is
-                attached before the position exists.
+                No closed trades yet. Run the tape. This sample is a fast 15-minute path, and the strategy skips
+                swings that are not a pullback in the slower trend. A fill always has its target attached first.
               </p>
             ) : (
               <Table>
@@ -524,7 +524,7 @@ export function Desk() {
                 What is actually on the chart: a blue diamond on bullish bars and up swings, a red triangle on bearish bars and down swings, gray structure through the pivots, and a fan of lines into a climax low. The order strip under the second shot is the requirement that matters: every idea has a price, a stop, and a take profit.
               </p>
               <p>
-                The desk follows that rule. Diamonds and triangles are the map. A trade prints only when a confirmed swing agrees with the short EMA, the stop is beyond that swing, and the target is a multiple of that risk. If an alert omits the target, the desk calculates it. If the target is on the wrong side of the entry, the desk refuses the order.
+                The desk follows that rule and refuses the trades that were giving the profit back. Diamonds and triangles are the map. A trade prints only when a confirmed swing has pulled back to the fast EMA, the slow EMA and ADX still agree, the stop is beyond that swing but not a chase, and the target is a multiple of that risk. After the trade travels 1R, the stop locks a quarter-R and then trails. If an alert omits the target, the desk calculates it. If the target is on the wrong side of the entry, the desk refuses the order.
               </p>
               <p>
                 Nothing in the pictures, or in any public library, can make the exit profit on every trade. When one bar trades through both prices, this desk fills the stop. The sample tape includes targets and at least one stop so that difference stays visible.
@@ -553,7 +553,13 @@ export function Desk() {
                   <a className="underline" href="https://www.investopedia.com/terms/a/atr.asp">
                     Average true range
                   </a>{" "}
-                  is the distance used when an alert arrives without its own stop.
+                  is the distance used when an alert arrives without its own stop, and the buffer beyond a swing.
+                </li>
+                <li>
+                  <a className="underline" href="https://ripbacktest.com/posts/ema-9-20-crossover-gold/">
+                    Gold EMA test, 15-minute and 1-hour, 2004–2026
+                  </a>
+                  . After costs, the 15-minute versions lost. The 1-hour versions that capped winners at 1R also lost.
                 </li>
               </ul>
             </div>

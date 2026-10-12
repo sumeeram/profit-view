@@ -17,6 +17,8 @@ Visible on the chart:
 
 The pictures do not name the indicator. Diamond TP does not try to clone a closed script. It trades the rule that is actually visible: a confirmed swing in the direction of a short EMA, a stop beyond that swing, and a take-profit sized as a multiple of the risk. Diamonds and triangles on every bar are the map. They are not all orders.
 
+That raw rule was taking the trades that lose. The stop was a quarter of an ATR past the swing, so ordinary gold wicks tagged it. The fast EMA slope flipped in chop. A swing up to 4.5 ATR away was still allowed, which is a late chase. And once price traveled 1R, the stop jumped to the exact entry, so the pullback that normally follows a move closed the trade flat. The script now requires a pullback to the fast EMA while a slow EMA and ADX still show a trend, keeps the stop between 0.8 and 2.2 ATR, and after 1R locks a quarter-R then trails one R behind the best price.
+
 ## Run
 
 ```bash
@@ -65,17 +67,20 @@ Close body:
 
 ## Rules
 
-- One open position.
+- One open position. New entries only during 07:00–20:00 UTC.
+- Chart: **1 hour**, with the 4-hour EMA stack in the same direction. 5-minute and 15-minute gold of this kind paid the spread more than the target in a 2004–2026 test. 4-hour is cleaner and much rarer. 45-minute is an awkward middle: the swings are real, but the higher-timeframe filter and the session are built around the hour.
 - Size is `equity × risk percent / stop distance`. Default risk is 1% of 10,000.
-- Default target is 2R. After price travels 1R, the stop moves to entry and the target stays put.
-- Same-bar stop and target: stop fills. The path inside the bar is unknown.
+- A long is a confirmed swing low that reached the fast EMA, while the fast EMA is above a rising slow EMA, ADX is at least 20, and RSI has turned up without being extended. Shorts mirror that. The stop is half an ATR beyond the swing, and the risk has to sit between 0.8 and 2.2 ATR or the trade is skipped.
+- Default target is 2R. After price travels 1R, the stop locks 0.25R of profit and trails one R behind the best price. The target stays put.
+- Same-bar stop and target: stop fills. The path inside the bar is unknown. The lock is placed at the bar close, so it protects the following bars.
 
 ## Resources
 
 - [Pine Script alerts](https://www.tradingview.com/pine-script-docs/faq/alerts/)
 - [`strategy.exit`](https://www.tradingview.com/pine-script-reference/v6/#fun_strategy.exit) for the stop and limit
 - [Webhook alerts](https://www.tradingview.com/support/solutions/43000529348-how-to-configure-webhook-alerts/)
-- [Average true range](https://www.investopedia.com/terms/a/atr.asp), used when an alert has no stop of its own
+- [Average true range](https://www.investopedia.com/terms/a/atr.asp), used when an alert has no stop of its own, and as the buffer past a swing
+- [EMA 9/20 on gold, 15-minute and 1-hour, 2004–2026](https://ripbacktest.com/posts/ema-9-20-crossover-gold/). None of the 15-minute variants made money after costs. On the 1-hour chart, capping the winner at 1R lost money; letting the winner run was the only variant with a gross edge, and even that failed a later validation gate. Diamond TP keeps a 2R target and a trail instead of scratching the trade at the entry.
 
 ## Tests
 
@@ -83,4 +88,4 @@ Close body:
 npm test
 ```
 
-The engine tests cover a missing target, a target on the wrong side, a same-bar stop-and-target collision, and a full replay that both takes profit and hits a stop.
+The engine tests cover a missing target, a target on the wrong side, a same-bar stop-and-target collision, the profit lock after 1R, a pullback that qualifies, a chase that does not, and the sample tape refusing those chase swings.

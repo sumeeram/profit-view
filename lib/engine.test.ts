@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { armBracket, BracketError, resolveBar } from "./broker";
 import { defaultSettings } from "./defaults";
+import { signalRules } from "./signal-rules";
 import { createInitial, applyWebhook, playAll } from "./session";
+import { signalAt } from "./strategy";
 import type { Candle, Position } from "./types";
 
 const settings = { ...defaultSettings, rewardRisk: 2, atrStopMult: 1 };
@@ -15,20 +17,32 @@ test("a missing take profit is armed at the reward multiple", () => {
 
 test("a long with the target below the entry is refused", () => {
   assert.throws(
-    () => armBracket({ side: "long", entry: 100, stop: 95, takeProfit: 99 }, settings),
-    (error: unknown) => error instanceof BracketError && /take profit/i.test(error.message),
+    () =>
+      armBracket(
+        { side: "long", entry: 100, stop: 95, takeProfit: 99 },
+        settings,
+      ),
+    (error: unknown) =>
+      error instanceof BracketError && /take profit/i.test(error.message),
   );
 });
 
 test("a long with the stop above the entry is refused", () => {
   assert.throws(
-    () => armBracket({ side: "long", entry: 100, stop: 101, takeProfit: 110 }, settings),
+    () =>
+      armBracket(
+        { side: "long", entry: 100, stop: 101, takeProfit: 110 },
+        settings,
+      ),
     BracketError,
   );
 });
 
 test("a short target is armed below the entry when omitted", () => {
-  const bracket = armBracket({ side: "short", entry: 100, stop: 104 }, settings);
+  const bracket = armBracket(
+    { side: "short", entry: 100, stop: 104 },
+    settings,
+  );
   assert.equal(bracket.takeProfit, 92);
 });
 
@@ -48,46 +62,70 @@ test("a bar that touches the stop and the target fills the stop", () => {
   assert.equal(resolved.exit?.price, 95);
 });
 
-test("reaching 1R moves the stop to entry and a later tag exits flat", () => {
+test("reaching 1R locks a quarter-R and a later tag exits there", () => {
   const position = samplePosition();
-  const push: Candle = { time: 2, open: 100, high: 106, low: 100.5, close: 105 };
+  const push: Candle = {
+    time: 2,
+    open: 100,
+    high: 106,
+    low: 100.5,
+    close: 105,
+  };
   const armed = resolveBar(position, push, 1);
   assert.equal(armed.exit, undefined);
-  assert.equal(armed.position.stop, 100);
+  assert.equal(armed.position.stop, 101.25);
   assert.equal(armed.position.breakevenArmed, true);
-  const back: Candle = { time: 3, open: 105, high: 105.5, low: 99.5, close: 101 };
+  const back: Candle = {
+    time: 3,
+    open: 105,
+    high: 105.5,
+    low: 99.5,
+    close: 101,
+  };
   const resolved = resolveBar(armed.position, back, 1);
   assert.equal(resolved.exit?.reason, "breakeven");
-  assert.equal(resolved.exit?.price, 100);
+  assert.equal(resolved.exit?.price, 101.25);
 });
 
-test("the paper session books at least one take-profit and never opens without one", () => {
-  const played = playAll(createInitial());
-  for (const trade of played.trades) {
-    if (trade.side === "long") {
-      assert.ok(trade.takeProfit > trade.entry);
-      assert.ok(trade.initialStop < trade.entry);
-    } else {
-      assert.ok(trade.takeProfit < trade.entry);
-      assert.ok(trade.initialStop > trade.entry);
-    }
+test("a push past 1R trails the stop one R behind the best price", () => {
+  const position = samplePosition();
+  const push: Candle = { time: 2, open: 100, high: 109, low: 104, close: 108 };
+  const armed = resolveBar(position, push, 1);
+  assert.equal(armed.exit, undefined);
+  assert.equal(armed.position.stop, 104);
+  assert.equal(armed.position.peak, 109);
+});
+
+test("the 15-minute sample skips chase swings and never opens without a target", () => {
+  const initial = createInitial();
+  for (let index = 0; index < initial.candles.length; index += 1) {
+    const signal = signalAt(initial.candles, index, initial.settings);
+    assert.equal(signal, null);
   }
-  const targets = played.trades.filter((trade) => trade.reason === "take_profit");
-  const stops = played.trades.filter((trade) => trade.reason === "stop");
-  assert.ok(stops.length >= 1, "the tape should include a stop, so a target is not guaranteed");
-  assert.ok(
-    targets.length >= 1,
-    `expected a take-profit fill, got ${JSON.stringify(
-      played.trades.map((trade) => ({
-        side: trade.side,
-        reason: trade.reason,
-        entry: trade.entry,
-        exit: trade.exit,
-        r: trade.r,
-      })),
-    )}`,
-  );
-  assert.ok(played.position === null || played.position.takeProfit !== played.position.entry);
+  const played = playAll(initial);
+  assert.equal(played.trades.length, 0);
+  assert.equal(played.position, null);
+});
+
+test("a pullback that stays inside the trend is a long, and a chase or a closed session is not", () => {
+  const pullback = buildPullback(0.45, 12);
+  const signal = signalAt(pullback, 85, defaultSettings);
+  assert.ok(signal);
+  assert.equal(signal.side, "long");
+  assert.equal(signal.barIndex, 85);
+  assert.ok(signal.stop < signal.entry);
+  assert.ok(signal.takeProfit > signal.entry);
+  const risk = signal.entry - signal.stop;
+  assert.ok(risk > signal.atr * signalRules.minRiskAtr);
+  assert.ok(risk < signal.atr * signalRules.maxRiskAtr);
+
+  const chase = buildPullback(1.6, 12);
+  for (let index = 0; index < chase.length; index += 1) {
+    assert.equal(signalAt(chase, index, defaultSettings), null);
+  }
+
+  const overnight = buildPullback(0.45, 2);
+  assert.equal(signalAt(overnight, 85, defaultSettings), null);
 });
 
 test("a webhook buy without a target still opens with a take profit", () => {
@@ -133,6 +171,25 @@ test("the tape does not invent a fill for a TradingView bracket", () => {
   assert.equal(state.position?.source, "tradingview");
 });
 
+function buildPullback(bounce: number, hour: number): Candle[] {
+  const candles: Candle[] = [];
+  let price = 2300;
+  const start = Date.UTC(2026, 0, 1, hour, 0, 0) / 1000;
+  for (let i = 0; i < 100; i += 1) {
+    let drift = 0.25 + Math.sin(i / 3) * 0.9;
+    if (i >= 80 && i <= 82) drift = -0.45;
+    if (i >= 83) drift = bounce;
+    const open = Math.round(price * 100) / 100;
+    const close = Math.round((price + drift) * 100) / 100;
+    const high = Math.round((Math.max(open, close) + 0.25) * 100) / 100;
+    let low = Math.round((Math.min(open, close) - 0.18) * 100) / 100;
+    if (i === 82) low = Math.round((low - 0.08) * 100) / 100;
+    candles.push({ time: start + i * 86400, open, high, low, close });
+    price = close;
+  }
+  return candles;
+}
+
 function samplePosition(): Position {
   return {
     id: "pos-1",
@@ -147,5 +204,6 @@ function samplePosition(): Position {
     source: "strategy",
     breakevenArmed: false,
     riskPerUnit: 5,
+    peak: 100,
   };
 }
